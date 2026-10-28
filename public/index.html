@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Qrispy Payment — Simple Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      max-width: 640px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    h1 { font-size: 24px; margin-bottom: 8px; color: #333; }
+    .subtitle { color: #666; margin-bottom: 24px; font-size: 14px; }
+    .card {
+      background: #f7f8fa;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #555;
+      margin-bottom: 6px;
+    }
+    input {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      font-size: 14px;
+      margin-bottom: 14px;
+    }
+    input:focus { outline: none; border-color: #667eea; }
+    button {
+      width: 100%;
+      padding: 14px;
+      background: #667eea;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover { background: #5568d3; }
+    button:disabled { background: #aaa; cursor: not-allowed; }
+    .btn-secondary { background: #6c757d; }
+    .btn-secondary:hover { background: #5a6268; }
+    .btn-danger { background: #dc3545; }
+    .btn-danger:hover { background: #c82333; }
+    .btn-row { display: flex; gap: 10px; margin-top: 10px; }
+    .btn-row button { flex: 1; }
+    #qrisResult { display: none; }
+    #qrisImage {
+      width: 100%;
+      max-width: 320px;
+      display: block;
+      margin: 0 auto 16px;
+      border-radius: 8px;
+      border: 1px solid #ddd;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .status-pending { background: #fff3cd; color: #856404; }
+    .status-paid { background: #d4edda; color: #155724; }
+    .status-expired { background: #f8d7da; color: #721c24; }
+    .status-error { background: #f8d7da; color: #721c24; }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #eee;
+      font-size: 14px;
+    }
+    .info-row:last-child { border-bottom: none; }
+    .info-label { color: #666; }
+    .info-value { font-weight: 600; color: #333; text-align: right; word-break: break-all; }
+    .error { color: #dc3545; font-size: 14px; margin-top: 10px; }
+    .loading { text-align: center; color: #667eea; font-weight: 600; padding: 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>💳 Qrispy Payment</h1>
+    <p class="subtitle">Generate QRIS, cek status & cancel — demo sederhana</p>
+
+    <!-- FORM -->
+    <div class="card" id="formCard">
+      <label>Amount (IDR)</label>
+      <input type="number" id="amount" placeholder="50000" value="50000" min="1" />
+
+      <label>Payment Reference (opsional)</label>
+      <input type="text" id="paymentRef" placeholder="Order-123" />
+
+      <label>Return URL (opsional)</label>
+      <input type="text" id="returnUrl" placeholder="https://yoursite.com/thanks" />
+
+      <button id="generateBtn" onclick="generateQRIS()">Generate QRIS</button>
+      <div class="error" id="formError"></div>
+    </div>
+
+    <!-- RESULT -->
+    <div class="card" id="qrisResult">
+      <div class="loading" id="loading">Loading...</div>
+
+      <div id="resultContent" style="display:none">
+        <img id="qrisImage" alt="QRIS Code" />
+
+        <div class="info-row">
+          <span class="info-label">Status</span>
+          <span id="statusBadge" class="status-badge">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">QRIS ID</span>
+          <span class="info-value" id="qrisId">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Amount</span>
+          <span class="info-value" id="qrisAmount">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Expired At</span>
+          <span class="info-value" id="qrisExpired">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Reference</span>
+          <span class="info-value" id="qrisRef">-</span>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn-secondary" onclick="checkStatus()">🔄 Cek Status</button>
+          <button class="btn-danger" onclick="cancelQRIS()">✖ Cancel</button>
+        </div>
+        <div class="btn-row">
+          <button onclick="resetForm()">+ Buat Baru</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- BALANCE -->
+    <div class="card">
+      <label>Saldo Merchant</label>
+      <div id="balanceText" style="font-size: 22px; font-weight: 700; color: #667eea; margin-top: 6px;">—</div>
+      <button class="btn-secondary" style="margin-top: 12px;" onclick="loadBalance()">💰 Cek Saldo</button>
+    </div>
+  </div>
+
+  <script>
+    let currentQrisId = null;
+    let pollTimer = null;
+
+    function formatIDR(n) {
+      return "Rp " + Number(n).toLocaleString("id-ID");
+    }
+
+    async function generateQRIS() {
+      const amount = document.getElementById("amount").value;
+      const paymentRef = document.getElementById("paymentRef").value.trim();
+      const returnUrl = document.getElementById("returnUrl").value.trim();
+      const errEl = document.getElementById("formError");
+      errEl.textContent = "";
+
+      if (!amount || Number(amount) <= 0) {
+        errEl.textContent = "Amount wajib diisi dan > 0";
+        return;
+      }
+
+      const btn = document.getElementById("generateBtn");
+      btn.disabled = true;
+      btn.textContent = "Memproses...";
+
+      try {
+        const res = await fetch("/api/qris/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            amount: Number(amount),
+            payment_reference: paymentRef || undefined,
+            return_url: returnUrl || undefined,
+          }),
+        });
+        const data = await res.json();
+
+        if (data.status !== "success") {
+          errEl.textContent = data.message || "Gagal generate QRIS";
+          return;
+        }
+
+        showResult(data.data);
+      } catch (e) {
+        errEl.textContent = "Error: " + e.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Generate QRIS";
+      }
+    }
+
+    function showResult(q) {
+      currentQrisId = q.qris_id;
+      document.getElementById("formCard").style.display = "none";
+      document.getElementById("qrisResult").style.display = "block";
+      document.getElementById("loading").style.display = "none";
+      document.getElementById("resultContent").style.display = "block";
+
+      document.getElementById("qrisImage").src =
+        q.qris_image_base64 || q.qris_image_url;
+      document.getElementById("qrisId").textContent = q.qris_id;
+      document.getElementById("qrisAmount").textContent = formatIDR(q.amount);
+      document.getElementById("qrisExpired").textContent = new Date(
+        q.expired_at
+      ).toLocaleString("id-ID");
+      document.getElementById("qrisRef").textContent =
+        q.payment_reference || "-";
+
+      setStatus("pending");
+
+      // Auto-polling tiap 5 detik
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(checkStatus, 5000);
+    }
+
+    function setStatus(s) {
+      const el = document.getElementById("statusBadge");
+      el.textContent = s.toUpperCase();
+      el.className = "status-badge status-" + s;
+      if (s === "paid" || s === "expired") {
+        if (pollTimer) clearInterval(pollTimer);
+      }
+    }
+
+    async function checkStatus() {
+      if (!currentQrisId) return;
+      try {
+        const res = await fetch(`/api/qris/${currentQrisId}/status`);
+        const data = await res.json();
+        if (data.status === "success" && data.data) {
+          setStatus(data.data.status);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function cancelQRIS() {
+      if (!currentQrisId) return;
+      if (!confirm("Yakin cancel QRIS ini?")) return;
+      try {
+        const res = await fetch(`/api/qris/${currentQrisId}/cancel`, {
+          method: "POST",
+        });
+        const data = await res.json();
+        if (data.status === "success") {
+          alert("QRIS berhasil dibatalkan");
+          resetForm();
+        } else {
+          alert("Gagal cancel: " + (data.message || "Unknown error"));
+        }
+      } catch (e) {
+        alert("Error: " + e.message);
+      }
+    }
+
+    function resetForm() {
+      if (pollTimer) clearInterval(pollTimer);
+      currentQrisId = null;
+      document.getElementById("qrisResult").style.display = "none";
+      document.getElementById("formCard").style.display = "block";
+      document.getElementById("formError").textContent = "";
+    }
+
+    async function loadBalance() {
+      const el = document.getElementById("balanceText");
+      el.textContent = "Memuat...";
+      try {
+        const res = await fetch("/api/balance");
+        const data = await res.json();
+        if (data.status === "success") {
+          el.textContent = formatIDR(data.data.balance);
+        } else {
+          el.textContent = "Gagal memuat saldo";
+        }
+      } catch (e) {
+        el.textContent = "Error: " + e.message;
+      }
+    }
+  </script>
+</body>
+</html>
