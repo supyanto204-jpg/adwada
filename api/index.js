@@ -1707,13 +1707,62 @@ async function revokeAllUserSessions(userId, exceptSessionId = null) {
 
 // mark deposit paid. dipanggil dari webhook / sync / admin approve
 async function markDepositPaid(deposit, receivedAmount, paidAt) {
-    const saldoMasuk = Number(deposit.amount);
-    const totalBayar = Number(receivedAmount) || Number(deposit.total_amount) || saldoMasuk;
-
-    const gatewayFee = Math.max(0, totalBayar - saldoMasuk);
+    const storedAmount = Number(deposit.amount) || 0;
+    const storedTotalAmount = Number(deposit.total_amount) || 0;
     const storedFee = Number(deposit.fee) || 0;
-    const ourFee = storedFee > 0 ? storedFee : calculateDepositFee(saldoMasuk);
-    const fee = gatewayFee + ourFee;
+
+    let safeAmount = storedAmount;
+    if (storedTotalAmount > 0 && storedFee >= 0) {
+        const reconstructed = storedTotalAmount - storedFee;
+        if (reconstructed > 0 && reconstructed < storedAmount) {
+            safeAmount = reconstructed;
+        }
+    }
+
+    const recalculatedFee = calculateDepositFee(safeAmount);
+    const ourFee = (storedFee > 0 && storedFee >= recalculatedFee * 0.5 && storedFee <= recalculatedFee * 3)
+        ? storedFee
+        : recalculatedFee;
+
+    const expectedTotalAmount = safeAmount + ourFee;
+
+    const rawReceived = Number(receivedAmount) || Number(deposit.total_amount) || 0;
+    let actualReceived = rawReceived;
+    let autoFixReason = null;
+
+    if (actualReceived <= 0) {
+        throw new Error(`Invalid receivedAmount (${actualReceived}) for deposit ${deposit.reference_id}`);
+    }
+
+    if (actualReceived > expectedTotalAmount) {
+        console.warn(`⚠️ [AUTO-FIX] ${deposit.reference_id}: received(${actualReceived}) > expectedTotal(${expectedTotalAmount}). Capping.`);
+        actualReceived = expectedTotalAmount;
+        autoFixReason = 'received_exceeds_total';
+    }
+
+    const MIN_RECEIVED_RATIO = 0.5;
+    if (actualReceived < safeAmount * MIN_RECEIVED_RATIO) {
+        console.warn(`⚠️ [AUTO-FIX] ${deposit.reference_id}: received(${actualReceived}) < ${MIN_RECEIVED_RATIO * 100}% of amount(${safeAmount}). Using expectedTotalAmount.`);
+        actualReceived = expectedTotalAmount;
+        autoFixReason = autoFixReason || 'received_below_minimum';
+    }
+
+    const GATEWAY_FEE_TOLERANCE = 0.10;
+    const minReceivedForFullCredit = safeAmount * (1 - GATEWAY_FEE_TOLERANCE);
+
+    let saldoMasuk;
+    if (actualReceived >= minReceivedForFullCredit) {
+        saldoMasuk = safeAmount;
+        saldoMasuk = Math.min(saldoMasuk, expectedTotalAmount);
+    } else {
+        saldoMasuk = Math.min(safeAmount, actualReceived);
+    }
+
+    saldoMasuk = Math.min(saldoMasuk, actualReceived, safeAmount);
+
+    const gatewayFee = Math.max(0, actualReceived - saldoMasuk);
+    const totalFee = ourFee + gatewayFee;
+    const finalTotalBayar = actualReceived;
 
     const paidTime = paidAt ? new Date(paidAt) : new Date();
 
@@ -1726,17 +1775,21 @@ async function markDepositPaid(deposit, receivedAmount, paidAt) {
         await client.query('BEGIN');
 
         const updateRes = await client.query(
-            `UPDATE deposits 
-             SET status = 'success', paid_at = $1, updated_at = NOW(),
-                 total_amount = $2, fee = $3
-             WHERE id = $4 AND status = 'pending'
+            `UPDATE deposits
+             SET status = 'success',
+                 paid_at = $1,
+                 updated_at = NOW(),
+                 amount = $2,
+                 total_amount = $3,
+                 fee = $4
+             WHERE id = $5 AND status = 'pending'
              RETURNING *`,
-            [paidTime, totalBayar, fee, deposit.id]
+            [paidTime, safeAmount, finalTotalBayar, totalFee, deposit.id]
         );
 
         if (updateRes.rowCount === 0) {
             await client.query('ROLLBACK');
-            return { alreadyProcessed: true, saldoMasuk, totalBayar, fee };
+            return { alreadyProcessed: true, saldoMasuk, totalBayar: finalTotalBayar, fee: totalFee };
         }
 
         freshDeposit = updateRes.rows[0];
@@ -1749,14 +1802,29 @@ async function markDepositPaid(deposit, receivedAmount, paidAt) {
         await client.query(
             `INSERT INTO transactions (user_id, order_id, service_name, status, price)
              VALUES ($1, $2, $3, $4, $5)`,
-            [deposit.user_id, deposit.reference_id, 'Deposit QRIS', 'success', totalBayar]
+            [deposit.user_id, deposit.reference_id, 'Deposit QRIS', 'success', finalTotalBayar]
         );
 
         await client.query(
             `INSERT INTO status_logs (entity_type, entity_id, user_id, old_status, new_status, reason, metadata)
              VALUES ($1, $2, $3, $4, $5, $6, $7)`,
             ['deposit', deposit.reference_id, deposit.user_id, deposit.status, 'success', 'payment_received',
-             JSON.stringify({ saldoMasuk, totalBayar, fee, gatewayFee, ourFee, method: deposit.method })]
+             JSON.stringify({
+                 saldoMasuk,
+                 totalBayar: finalTotalBayar,
+                 fee: totalFee,
+                 gatewayFee,
+                 ourFee,
+                 method: deposit.method,
+                 raw_received_amount: rawReceived,
+                 actual_received_used: actualReceived,
+                 original_stored_amount: storedAmount,
+                 original_stored_total_amount: storedTotalAmount,
+                 original_stored_fee: storedFee,
+                 safe_amount_used: safeAmount,
+                 expected_total_amount: expectedTotalAmount,
+                 auto_fix_reason: autoFixReason,
+             })]
         );
 
         const userRes = await client.query(
@@ -1767,7 +1835,13 @@ async function markDepositPaid(deposit, receivedAmount, paidAt) {
 
         await client.query('COMMIT');
         committed = true;
-        console.log(`✅ Deposit ${deposit.reference_id} | +${saldoMasuk} | gateway=${gatewayFee} | profit=${ourFee} | total_fee=${fee}`);
+
+        const fixNote = autoFixReason ? ` [AUTO-FIX: ${autoFixReason}]` : '';
+        console.log(
+            `✅ Deposit ${deposit.reference_id} | saldo+${saldoMasuk} | ` +
+            `received=${actualReceived} | gateway_fee=${gatewayFee} | ` +
+            `our_fee=${ourFee} | total_fee=${totalFee}${fixNote}`
+        );
     } catch (err) {
         if (!committed) await client.query('ROLLBACK').catch(() => {});
         console.error('markDepositPaid error:', err.message);
@@ -1776,7 +1850,17 @@ async function markDepositPaid(deposit, receivedAmount, paidAt) {
         client.release();
     }
 
-    return { alreadyProcessed: false, saldoMasuk, totalBayar, fee, gatewayFee, ourFee, freshDeposit, userData };
+    return {
+        alreadyProcessed: false,
+        saldoMasuk,
+        totalBayar: finalTotalBayar,
+        fee: totalFee,
+        gatewayFee,
+        ourFee,
+        freshDeposit,
+        userData,
+        autoFixReason,
+    };
 }
 
 // sync deposit — qrispy only
